@@ -10,6 +10,7 @@ from reportlab.pdfgen import canvas
 from reportlab.lib.pagesizes import A4, A3
 from reportlab.lib import colors
 from reportlab.lib.units import cm, mm
+import streamlit.components.v1 as components
 
 # -----------------------------------------------------------------------------
 # 1. CONFIGURATION & CONSTANTS
@@ -20,7 +21,7 @@ st.set_page_config(page_title="Exploration Monitoring Dashboard", layout="wide")
 STATUS_COLORS = {
     'Closed': '#00CC96',       # Green
     'Running': '#FFA15A',      # Orange
-    'Under Shifting': '#E74C3C', # Blue
+    'Under Shifting': '#FFFF00', # Blue
     'Breakdown': '#E74C3C',    # Red
     'Pending': '#AB63FA',      # Purple/Grey
     'Unknown': '#B6E880'
@@ -380,9 +381,12 @@ def generate_graphic_log_pdf(df_litho, df_collar, selected_bhids):
     return buffer
 
 
-
+# -----------------------------------------------------------------------------
+# VIEW RENDERING: PLAN VIEW MAP
+# -----------------------------------------------------------------------------
 def render_map(key_suffix="map"):
     st.markdown("### 🗺️ Status Map")
+        
     collar = st.session_state['df_collar']
     boundary = st.session_state['df_boundary']
     
@@ -409,9 +413,30 @@ def render_map(key_suffix="map"):
     cmpdi_collar = collar[collar['TYPE'] == 'CMPDI']
     gsi_collar = collar[collar['TYPE'] == 'GSI']
 
+    # Safely handle NaN values for the Map Text Labels
+    def format_map_label(row):
+        disp = str(row.get('DISPLAY_ID', 'Unknown'))
+    
+        rl = row.get('RL')
+        rl_str = f"RL: {rl}" if pd.notna(rl) and str(rl).lower().strip() != 'nan' else "RL: N/A"
+        
+        cl = row.get('DEPTH')
+        cl_str = f"CD: {cl}" if pd.notna(cl) and str(cl).lower().strip() != 'nan' else "CD: N/A"
+        
+        sid = row.get('SID')
+        if pd.isna(sid) or str(sid).lower().strip() in ['nan', 'none', '']:
+            sid_str = ""
+        else:
+            try:
+                sid_str = f"SID: {int(float(sid))}"
+            except (ValueError, TypeError):
+                sid_str = f"SID: {sid}"
+                
+        return f"<b>{disp}</b><br>{rl_str}<br>{cl_str}<br>{sid_str}"
+
     ordered_statuses = ['Closed', 'Running', 'Under Shifting', 'Breakdown', 'Pending', 'Unknown']
     
-    # 2. Plot CMPDI Boreholes by their active status
+    # 2. Plot CMPDI Boreholes (Markers and Labels linked by Legendgroup)
     available_statuses = cmpdi_collar['STATUS'].unique()
     for status in [s for s in ordered_statuses if s in available_statuses]:
         subset = cmpdi_collar[cmpdi_collar['STATUS'] == status]
@@ -431,13 +456,26 @@ def render_map(key_suffix="map"):
             for _, row in subset.iterrows()
         ]
         
+        # Add the points
         fig.add_trace(go.Scatter(
             x=subset['X'], y=subset['Y'], mode='markers',
             marker=dict(size=marker_size, color=color, symbol=marker_symbol, line=dict(width=0.5, color='black')),
-            name=status, hoverinfo='text', hovertext=hover_text
+            name=status, hoverinfo='text', hovertext=hover_text,
+            legendgroup=status  # Ties this trace to the group
+        ))
+        
+        # Add the text labels tied to the SAME group so they toggle together
+        subset_labels = subset.apply(format_map_label, axis=1)
+        fig.add_trace(go.Scatter(
+            x=subset['X'], y=subset['Y'] - y_offset, mode='text',
+            text=subset_labels, 
+            textposition="bottom center", 
+            textfont=dict(size=6, color=PLOT_TEXT_COLOR),
+            showlegend=False, hoverinfo='skip',
+            legendgroup=status  # Ties this label trace to the marker trace above
         ))
 
-    # 3. Plot GSI Boreholes separately with a Distinct Marker Style
+    # 3. Plot GSI Boreholes separately
     if not gsi_collar.empty:
         hover_text_gsi = [
             f"<b>{row.get('DISPLAY_ID', '')}</b><br>"
@@ -450,58 +488,144 @@ def render_map(key_suffix="map"):
         
         fig.add_trace(go.Scatter(
             x=gsi_collar['X'], y=gsi_collar['Y'], mode='markers',
-            # Bright Blue Triangle for GSI to visually contrast with CMPDI circles
             marker=dict(size=10, color='#FF0055', symbol='triangle-up', line=dict(width=0.5, color='black')),
-            name="GSI Bhs", hoverinfo='text', hovertext=hover_text_gsi
+            name="GSI Bhs", hoverinfo='text', hovertext=hover_text_gsi,
+            legendgroup="GSI Bhs"
         ))
-
-    # 4. Safely handle NaN values for the Map Text Labels
-    def format_map_label(row):
-        disp = str(row.get('DISPLAY_ID', 'Unknown'))
+        
+        gsi_labels = gsi_collar.apply(format_map_label, axis=1)
+        fig.add_trace(go.Scatter(
+            x=gsi_collar['X'], y=gsi_collar['Y'] - y_offset, mode='text',
+            text=gsi_labels, 
+            textposition="bottom center", 
+            textfont=dict(size=6, color=PLOT_TEXT_COLOR),
+            showlegend=False, hoverinfo='skip',
+            legendgroup="GSI Bhs"
+        ))
     
-        rl = row.get('RL')
-        rl_str = f"RL: {rl}" if pd.notna(rl) and str(rl).lower().strip() != 'nan' else "RL: N/A"
-        
-        cl = row.get('DEPTH')
-        cl_str = f"CD: {cl}" if pd.notna(cl) and str(cl).lower().strip() != 'nan' else "CL: N/A"
-        
-        sid = row.get('SID')
-        if pd.isna(sid) or str(sid).lower().strip() in ['nan', 'none', '']:
-            sid_str = ""
-        else:
-            try:
-                # Format without decimals if it's a whole number
-                sid_str = f"SID: {int(float(sid))}"
-            except (ValueError, TypeError):
-                sid_str = f"SID: {sid}"
-                
-        return f"<b>{disp}</b><br>{rl_str}<br>{cl_str}<br>{sid_str}"
+    # -------------------------------------------------------------------------
+    # 🌟 ENHANCEMENTS: NORTH ARROW, FULL GRID BOX, LEGEND STYLING
+    # -------------------------------------------------------------------------
+    
+    # Add a North Arrow Annotation
+    fig.add_annotation(
+        text="<b>N<br>▲</b>",
+        xref="paper", yref="paper",
+        x=0.98, y=0.98,
+        showarrow=False,
+        font=dict(size=16, color="black"),
+        bgcolor="rgba(255, 255, 255, 0.8)",
+        borderwidth=1.5,
+        borderpad=4
+    )
 
-    # Apply the safe formatting function
-    label_texts = collar.apply(format_map_label, axis=1)
+    # Scale bar in the lower-right corner, aligned to the same base level
+    scale_x0 = 0.74
+    scale_x_mid = 0.83
+    scale_x1 = 0.92
+    scale_y = 0.08
 
-    # 5. Plot the cleaned text labels
-    fig.add_trace(go.Scatter(
-        x=collar['X'], y=collar['Y'] - y_offset, mode='text',
-        text=label_texts, 
-        textposition="bottom center", 
-        textfont=dict(size=6, color=PLOT_TEXT_COLOR),
-        showlegend=False, hoverinfo='skip'
-    ))
+    fig.add_shape(
+        type="line",
+        x0=scale_x0, x1=scale_x1, y0=scale_y, y1=scale_y,
+        xref="paper", yref="paper",
+        line=dict(color="black", width=2),
+    )
+
+    for tick_x in [scale_x0, scale_x_mid, scale_x1]:
+        fig.add_shape(
+            type="line",
+            x0=tick_x, x1=tick_x, y0=scale_y, y1=scale_y - 0.012,
+            xref="paper", yref="paper",
+            line=dict(color="black", width=2.5),
+        )
+
+    # fig.add_annotation(
+    #     text="SCALE",
+    #     x=scale_x0, y=scale_y + 0.018,
+    #     xref="paper", yref="paper",
+    #     showarrow=False,
+    #     font=dict(size=10, color="black"),
+    #     xanchor="left",
+    #     yanchor="bottom"
+    # )
+
+    for x_value, label in [(scale_x0, "0"), (scale_x_mid, "250m"), (scale_x1, "500m")]:
+        fig.add_annotation(
+            text=label,
+            x=x_value, y=scale_y - 0.018,
+            xref="paper", yref="paper",
+            showarrow=False,
+            font=dict(size=12, color="black"),
+            xanchor="center",
+            yanchor="top"
+        )
 
     fig.update_layout(
         title="Exploration Plan View",
-        xaxis_title="Easting (X)", yaxis_title="Northing (Y)",
-        yaxis=dict(scaleanchor="x", scaleratio=1),
-        legend_title="Status", height=500,
-        margin=dict(l=0, r=0, t=40, b=0),
-        plot_bgcolor='white'
+        autosize=True, # Allows the map to naturally shrink/grow based on width and scaleanchor
+        margin=dict(l=40, r=40, t=40, b=40),
+        # plot_bgcolor='white',
+        
+        # Borderless Legend
+        legend=dict(
+            title="Legend",
+            # bgcolor="rgba(255, 255, 255, 0.9)",
+            borderwidth=0, 
+            x=1.01, y=1,
+            xanchor="left", yanchor="top"
+        ),
+        
+        # PRIMARY AXES (Bottom and Left)
+        xaxis=dict(
+            title="Easting (X)",
+            showgrid=True, gridwidth=1, gridcolor='LightGray',
+            showline=True, linewidth=1.5, linecolor='black',
+            ticks='outside', tickcolor='black',
+            mirror=False,
+            tickformat=".0f" # Removes decimals and prevents 'k' or 'M' abbreviations
+        ),
+        yaxis=dict(
+            title="Northing (Y)",
+            scaleanchor="x", scaleratio=1, # Locks aspect ratio
+            showgrid=True, gridwidth=1, gridcolor='LightGray',
+            showline=True, linewidth=1.5, linecolor='black',
+            ticks='outside', tickcolor='black',
+            mirror=False,
+            tickformat=".0f" # Removes decimals and prevents 'k' or 'M' abbreviations
+        ),
+        
+        # SECONDARY AXES (Top and Right for matching ticks & labels)
+        xaxis2=dict(
+            overlaying='x', side='top', matches='x',
+            showgrid=False, showline=True, linewidth=1.5, linecolor='black',
+            ticks='outside', tickcolor='black', showticklabels=True,
+            tickformat=".0f"
+        ),
+        yaxis2=dict(
+            overlaying='y', side='right', matches='y',
+            showgrid=False, showline=True, linewidth=1.5, linecolor='black',
+            ticks='outside', tickcolor='black', showticklabels=True,
+            tickformat=".0f"
+        )
     )
-    fig.update_xaxes(showgrid=True, gridwidth=1, gridcolor='LightGray')
-    fig.update_yaxes(showgrid=True, gridwidth=1, gridcolor='LightGray')
     
-    st.plotly_chart(fig, use_container_width=True, key=f"plotly_map_{key_suffix}")
-
+    # -------------------------------------------------------------------------
+    # 📥 NO-LIBRARY HIGH-RESOLUTION DOWNLOAD LOGIC
+    # -------------------------------------------------------------------------
+    plotly_config = {
+        'displayModeBar': True,
+        'displaylogo': False,
+        'toImageButtonOptions': {
+            'format': 'png', 
+            'filename': 'Exploration_Map_HighRes',
+            'height': 650,
+            'width': 1200,
+            'scale': 3 
+        }
+    }
+    
+    st.plotly_chart(fig, use_container_width=True, config=plotly_config, key=f"plotly_map_{key_suffix}")
 
 
 
@@ -510,32 +634,61 @@ def render_map(key_suffix="map"):
 # 4. VIEW RENDERING (TABS)
 # -----------------------------------------------------------------------------
 def render_dashboard():
-    # Strict CSS injection to force metric center alignment
-    # Pushed completely to the left to avoid Markdown code-block rendering
+    # Strict CSS injection to force metric center alignment, AND handle A4 Printing
     st.markdown("""
 <style>
+/* Center metrics */
 [data-testid="stMetric"] {
     display: flex;
     flex-direction: column;
     align-items: center;
     text-align: center;
 }
-[data-testid="stMetricValue"] {
+[data-testid="stMetricValue"], [data-testid="stMetricLabel"] {
     width: 100%;
     display: flex;
     justify-content: center;
 }
-[data-testid="stMetricLabel"] {
-    width: 100%;
-    display: flex;
-    justify-content: center;
+
+/* =========================================================
+   🖨️ PRINT STYLES FOR A4 DASHBOARD EXPORT
+   ========================================================= */
+@media print {
+    @page { size: A4 portrait; margin: 10mm; }
+    header, .stSidebar, .stApp > header, .stToolbar, iframe { display: none !important; }
+    .print-hide { display: none !important; }
+    .stPlotlyChart, .stDataFrame, table, div[data-testid="stVerticalBlock"] > div {
+        page-break-inside: avoid !important; break-inside: avoid !important;
+    }
+    h1, h2, h3, h4, h5, h6 { page-break-after: avoid !important; break-after: avoid !important; }
+    * { -webkit-print-color-adjust: exact !important; print-color-adjust: exact !important; }
 }
 </style>
 """, unsafe_allow_html=True)
+
+    # --- ⚠️ NEW: Global Alert Input in Sidebar ---
+    st.sidebar.markdown("### ⚠️ Daily Operational Alert")
+    global_alert = st.sidebar.text_area(
+        "Block-wide issues (e.g., Heavy Rain):", 
+        help="This text will appear in the News Banner and WhatsApp Report."
+    ).strip()
     
     col_title, col_print = st.columns([3, 1])
     with col_title:
         st.markdown(f"### 📊 Exploration Overview")
+        
+    with col_print:
+        import streamlit.components.v1 as components
+        components.html(
+            """
+            <div style="text-align:right;">
+                <button onclick="window.parent.print()" style="background-color:#2962ff; color:white; border:none; padding:8px 16px; border-radius:4px; cursor:pointer; font-weight:bold; margin-top:2px; box-shadow: 0 2px 4px rgba(0,0,0,0.2); font-family: sans-serif;">
+                    🖨️ Print Dashboard
+                </button>
+            </div>
+            """,
+            height=45
+        )
         
     collar, litho = st.session_state['df_collar'], st.session_state.get('df_litho', pd.DataFrame())
     
@@ -549,14 +702,18 @@ def render_dashboard():
     breakdown = len(collar[collar['STATUS'] == 'Breakdown'])
     pending = len(collar[collar['STATUS'] == 'Pending'])
     
-    # Safe check for GPL Status (handles variations like 'DONE', 'Done', 'done')
+    # Safe check for GPL Status
     gpl = 0
     if 'GPL STATUS' in collar.columns:
         gpl = len(collar[collar['GPL STATUS'].astype(str).str.strip().str.title() == 'Done'])
     
     pending_total = pending + shifting + running + breakdown
 
-    # Dynamically build the metrics array
+    # Calculate Core Meterages early so they can be used in reports and banners
+    total_proposed = collar['ED'].sum()
+    total_drilled = collar[collar['STATUS'].isin(['Closed', 'Running', 'Under Shifting', 'Breakdown'])]['DEPTH'].sum()
+    balance = max(0, total_proposed - total_drilled)
+
     active_metrics = [
         {"label": "Total Proposed BHs", "value": total_bh},
         {"label": "Closed Boreholes", "value": closed},
@@ -564,74 +721,76 @@ def render_dashboard():
         {"label": "GPL Completed", "value": gpl}
     ]
     
-    if shifting > 0:
-        active_metrics.append({"label": "Under Shifting", "value": shifting})
-    if breakdown > 0:
-        active_metrics.append({"label": "Breakdown", "value": breakdown})
-        
+    if shifting > 0: active_metrics.append({"label": "Under Shifting", "value": shifting})
+    if breakdown > 0: active_metrics.append({"label": "Breakdown", "value": breakdown})
     active_metrics.append({"label": "Pending", "value": pending_total})
 
-    # Render dynamic columns
     cols = st.columns(len(active_metrics))
     for col, metric in zip(cols, active_metrics):
         col.metric(metric["label"], metric["value"])
     
-
     # =====================================================================
-    # 📢 NEWS UPDATE BANNER LOGIC (HTML STYLE)
+    # 📢 NEWS UPDATE BANNER LOGIC
     # =====================================================================
-    total_drilled_news = collar[collar['STATUS'].isin(['Closed', 'Running', 'Under Shifting', 'Breakdown'])]['DEPTH'].sum()
-    total_count = len(collar)
+    today = pd.to_datetime('today').normalize()
+    news_items = []
     
-    closed_bhs_news = collar[collar['STATUS'] == 'Closed'].copy()
-    last_closed_text = "N/A"
+    # --- 🚨 INJECT GLOBAL ALERT INTO BANNER ---
+    if global_alert:
+        news_items.append(f"<b style='color: #d32f2f;'>{global_alert}</b>")
     
-    if not closed_bhs_news.empty and not closed_bhs_news['CLOSING DATE'].isna().all():
-        closed_bhs_news = closed_bhs_news.sort_values(by='CLOSING DATE', ascending=False)
-        last_closed = closed_bhs_news.iloc[0]
-        
-        lc_bhid = last_closed.get('DISPLAY_ID', 'N/A')
-        lc_depth = last_closed.get('DEPTH', '')
-        lc_depth_str = f"{lc_depth:.2f} m" if pd.notna(lc_depth) else "N/A"
-        
-        lc_gpl = str(last_closed.get('GPL STATUS', '')).strip()
-        if lc_gpl.lower() in ['nan', 'none', '']: 
-            lc_gpl = "Pending"
-            
-        # Using HTML <b> tags for bolding inside the HTML div block
-        last_closed_text = f"<b>{lc_bhid}</b> (Depth: {lc_depth_str}, GPL: {lc_gpl})"
-
-    shifting_bhs_news = collar[collar['STATUS'] == 'Under Shifting']
-    shifting_text_list = []
+    news_items.append(f"<b>Total Meterage:</b> {total_drilled:,.2f} m")
+    news_items.append(f"<b>Closed Bhs:</b> {closed}/{total_bh}")
     
-    if not shifting_bhs_news.empty:
-        for _, row in shifting_bhs_news.iterrows():
-            rig_no = str(row.get('RIG NO', ''))
-            try:
-                if rig_no.strip().lower() not in ['nan', 'none', '']:
-                    rig_no = str(int(float(rig_no)))
-                else:
-                    rig_no = "Unknown Rig"
-            except (ValueError, TypeError):
-                pass
-                
-            target = row.get('DISPLAY_ID', 'Unknown Location')
-            shifting_text_list.append(f"Rig {rig_no} ➔ {target}")
-            
-        shifting_text = " | ".join(shifting_text_list)
+    breakdown_bhs = collar[collar['STATUS'] == 'Breakdown']
+    if not breakdown_bhs.empty:
+        bd_rigs = []
+        for _, r in breakdown_bhs.iterrows():
+            rig = str(r.get('RIG NO', 'Unknown'))
+            try: rig = str(int(float(rig)))
+            except: pass
+            bd_rigs.append(f"Rig {rig}")
+        news_items.append(f"<b>Rig Status:</b> 🔴 Breakdown ({', '.join(bd_rigs)})")
     else:
-        shifting_text = "All Operational"
+        news_items.append("<b>Rig Status:</b> 🟢 All Operational")
 
-    # Render the Styled HTML News Banner (Zero Indentation to prevent raw code rendering)
+    closed_bhs_news = collar[collar['STATUS'] == 'Closed'].copy()
+    if not closed_bhs_news.empty and 'CLOSING DATE' in closed_bhs_news.columns:
+        closed_bhs_news['CLOSING DATE_DT'] = pd.to_datetime(closed_bhs_news['CLOSING DATE'], errors='coerce')
+        closed_bhs_news_sorted = closed_bhs_news.dropna(subset=['CLOSING DATE_DT']).sort_values(by='CLOSING DATE_DT', ascending=False)
+        if not closed_bhs_news_sorted.empty:
+            last_closed = closed_bhs_news_sorted.iloc[0]
+            days_since_close = (today - last_closed['CLOSING DATE_DT'].normalize()).days
+            if 0 <= days_since_close <= 4:
+                lc_bhid = last_closed.get('DISPLAY_ID', 'N/A')
+                lc_depth = last_closed.get('DEPTH', 0)
+                lc_date_str = last_closed['CLOSING DATE_DT'].strftime('%d-%b-%Y')
+                news_items.append(f"<b>Last Closed:</b> {lc_bhid} at {lc_depth:.2f}m ({lc_date_str})")
+
+    # --- 🔬 SAMPLE DISPATCH BANNER EXTRACTION (LAST 4 DAYS) ---
+    recent_dispatches = pd.DataFrame()
+    if not closed_bhs_news.empty and 'DESPATCH_DATE' in closed_bhs_news.columns:
+        dispatch_df = closed_bhs_news.copy()
+        dispatch_df['DESPATCH_DATE_DT'] = pd.to_datetime(dispatch_df['DESPATCH_DATE'], errors='coerce')
+        dispatch_df = dispatch_df.dropna(subset=['DESPATCH_DATE_DT'])
+        
+        # Filter for samples sent in the last 4 days
+        recent_dispatches = dispatch_df[(today - dispatch_df['DESPATCH_DATE_DT']).dt.days.between(0, 4)].copy()
+        
+        if not recent_dispatches.empty:
+            for (date, lab), group in recent_dispatches.groupby(['DESPATCH_DATE_DT', 'LAB']):
+                num_bhs = len(group)
+                lab_name = str(lab).strip().upper() if pd.notna(lab) else "Lab"
+                date_str = date.strftime('%d-%b-%Y')
+                news_items.append(f"<b>Samples Dispatched ({date_str}):</b> No. of boreholes - {num_bhs}  Lab - {lab_name}")
+
+    news_html = " &nbsp; <span style='color:#ccc;'>|</span> &nbsp; ".join(news_items)
+
     st.markdown(f"""
-<div style="padding: 12px 15px; border-radius: 8px; background-color: #f8faff; color: #1e1e1e; border: 1px solid #d6e4ff; border-left: 6px solid #2962ff; font-size: 15px; margin-bottom: 15px; display: flex; align-items: center; box-shadow: 0 2px 4px rgba(0,0,0,0.04);">
+<div style="padding: 12px 15px; border-radius: 8px; background-color: #f8faff; color: #1e1e1e; border: 1px solid #d6e4ff; border-left: 6px solid #2962ff; font-size: 15px; margin-bottom: 10px; display: flex; align-items: center; box-shadow: 0 2px 4px rgba(0,0,0,0.04);">
     <span style="font-size: 20px; margin-right: 12px; animation: blink 2s infinite;">📢</span>
     <div style="line-height: 1.5;">
-        <strong style="color: #2962ff; letter-spacing: 0.5px;">UPDATE:</strong> &nbsp;
-        <b>Total Meterage:</b> {total_drilled_news:,.2f} m &nbsp; <span style="color:#ccc;">|</span> &nbsp;
-        <b>Closed Bhs:</b> {closed}/{total_count} &nbsp; <span style="color:#ccc;">|</span> &nbsp;
-        <b>Last Closed BH:</b> {last_closed_text} &nbsp; <span style="color:#ccc;">|</span> &nbsp;
-        <b>Rig Status :</b> {shifting_text}
+        <strong style="color: #2962ff; letter-spacing: 0.5px;">UPDATE:</strong> &nbsp; {news_html}
     </div>
 </div>
 <style>
@@ -639,19 +798,136 @@ def render_dashboard():
 </style>
 """, unsafe_allow_html=True)
     
+    # =====================================================================
+    # 📋 DAILY DRILLING PROGRESS REPORT GENERATOR (WhatsApp Auto-Format)
+    # =====================================================================
+    from datetime import timedelta
+    yesterday_dt = today - timedelta(days=1)
+    
+    def safe_format_rig_no(val):
+        if pd.isna(val) or str(val).strip().lower() in ['none', 'nan', '']: return ""
+        try: return f"{int(float(val))}"
+        except: return str(val)
 
-    st.markdown("---")
+    # Helper function to find the previous point drilled by a specific rig
+    def get_last_point_for_rig(rig_no, current_bhid):
+        if not rig_no: return "previous point"
+        rig_bhs = collar[(collar['RIG NO'].astype(str) == str(rig_no)) & (collar['BHID'] != current_bhid)].copy()
+        if rig_bhs.empty: return "previous point"
+        # Try to sort by DOC to get the most recent one before this
+        rig_bhs['temp_date'] = pd.to_datetime(rig_bhs['DOC'], errors='coerce')
+        rig_bhs = rig_bhs.sort_values('temp_date', ascending=False)
+        last_pt = rig_bhs.iloc[0].get('POINT', 'previous point')
+        return str(last_pt) if pd.notna(last_pt) and str(last_pt).strip() != '' else "previous point"
+
+    # Calculate Total Sent Boreholes globally for the report
+    total_sent_bhs = 0
+    if 'SAMPLING_STATUS' in collar.columns:
+        total_sent_bhs = len(collar[collar['SAMPLING_STATUS'].astype(str).str.strip().str.lower() == 'sent'])
+
+    report_lines = []
+    report_lines.append("*DRILLING PROGRESS REPORT*")
+    report_lines.append(f"Date: {yesterday_dt.strftime('%d-%m-%Y')}")
+    
+    # --- 🚨 INJECT GLOBAL ALERT INTO WHATSAPP REPORT ---
+    if global_alert:
+        report_lines.append(f"🚨 *UPDATE:* _{global_alert}_")
+        
+    report_lines.append("━━━━━━━━━━━━━━━━━━━━━━━━━━")
+    
+    active_bhs = collar[collar['STATUS'].isin(['Running', 'Breakdown', 'Under Shifting'])].copy()
+    recent_closed_df = pd.DataFrame()
+    if not closed_bhs_news.empty and 'CLOSING DATE_DT' in closed_bhs_news.columns:
+        recent_closed_df = closed_bhs_news[closed_bhs_news['CLOSING DATE_DT'] >= yesterday_dt].copy()
+        
+    report_bhs = pd.concat([active_bhs, recent_closed_df]).drop_duplicates(subset=['BHID'])
+    report_bhs['RIG_SORT'] = pd.to_numeric(report_bhs['RIG NO'], errors='coerce').fillna(999)
+    report_bhs = report_bhs.sort_values('RIG_SORT')
+    
+    for _, row in report_bhs.iterrows():
+        raw_rig_no = row.get('RIG NO', '')
+        rig_no = safe_format_rig_no(raw_rig_no)
+        rig_model = str(row.get('RIG MODEL', '')).strip()
+        
+        rig_display = f"*Rig {rig_no}*" if rig_no else "*Unknown Rig*"
+        if rig_model and rig_model.lower() not in ['nan', 'none', '']:
+            rig_display += f" ({rig_model})"
+            
+        bhid = row.get('BHID', 'N/A')
+        if pd.isna(bhid) or str(bhid).lower() == 'nan': bhid = 'nan'
+        point = row.get('POINT', 'N/A')
+        bhid_str = f"BHID: {bhid} | {point}" if point != 'N/A' and str(point).lower() != 'nan' else f"BHID: {bhid}"
+        
+        # Combined single-line Rig + BHID output
+        report_lines.append(f"▪️ {rig_display}, {bhid_str}")
+        
+        status = row['STATUS']
+        depth = row.get('DEPTH', 0)
+        
+        if status == 'Closed':
+            report_lines.append(f"  * Borehole Closed at {depth:.2f} m")
+            gpl_stat = str(row.get('GPL STATUS', '')).strip().title()
+            if gpl_stat == 'Done':
+                report_lines.append(f"  * GPL completed up to {depth:.2f} m")
+        elif status == 'Running':
+            report_lines.append(f"  * Depth: {depth:.2f} m")
+            doc = pd.to_datetime(row.get('DOC'), errors='coerce')
+            if pd.notna(doc):
+                days_running = (yesterday_dt - doc.normalize()).days
+                if -1 <= days_running <= 2: 
+                    last_point = get_last_point_for_rig(raw_rig_no, bhid)
+                    report_lines.append(f"  _Remark: Rig No. {rig_no}, Shifted from {last_point} to {point}, and Drilling operation started at {point}._")
+            
+            custom_remark = str(row.get('REMARKS', '')).strip()
+            if custom_remark and custom_remark.lower() not in ['nan', 'none', '']:
+                report_lines.append(f"  _Remark: {custom_remark}_")
+                
+        elif status == 'Breakdown':
+            report_lines.append(f"  * Depth: {depth:.2f} m")
+            custom_remark = str(row.get('REMARKS', '')).strip()
+            if custom_remark and custom_remark.lower() not in ['nan', 'none', '']:
+                report_lines.append(f"  _Remark: {custom_remark}_")
+            else:
+                report_lines.append(f"  _Remark: Rig is under breakdown condition._")
+                
+        elif status == 'Under Shifting':
+            last_point = get_last_point_for_rig(raw_rig_no, bhid)
+            report_lines.append(f"  _Remark: Rig No. {rig_no}, Under shifting from {last_point} to {point}._")
+
+        report_lines.append("")
+
+    # --- 📦 INJECT SAMPLE DISPATCH INTO WHATSAPP REPORT ---
+    if not recent_dispatches.empty:
+        report_lines.append("━━━━━━━━━━━━━━━━━━━━━━━━━━")
+        report_lines.append("📦 *Recent Sample Dispatches*")
+        for (date, lab), group in recent_dispatches.groupby(['DESPATCH_DATE_DT', 'LAB']):
+            num_bhs = len(group)
+            lab_name = str(lab).strip().upper() if pd.notna(lab) else "Lab"
+            date_str = date.strftime('%d-%m-%Y')
+            report_lines.append(f"▪️ Samples Dispatched ({date_str}): No. of boreholes - {num_bhs}, Lab - {lab_name}")
+        report_lines.append(f"Total - {total_sent_bhs} BHs")
+        # report_lines.append("")
+
+    report_lines.append("━━━━━━━━━━━━━━━━━━━━━━━━━━")
+    report_lines.append("📌 *Project Summary*")
+    report_lines.append(f"✅ Closed Boreholes: {closed} / {total_bh}")
+    report_lines.append(f"📈 Cumulative Meterage: {total_drilled:,.2f} m")
+    report_lines.append(f"🎯 GPL Completed: {gpl} BHs")
+    report_lines.append(f"🚧 Balance Meterage: {balance:,.2f} m")
+    report_lines.append(f"Total BHs Sent for analysis - {total_sent_bhs} BHs")
+    
+    report_text = "\n".join(report_lines)
+    
+    with st.expander("📋 Generate Daily Drilling Progress Report"):
+        st.code(report_text, language="markdown")
+
+   
     # =====================================================================
 
     c_left, c_right = st.columns([1, 1.5])
     
     with c_left:
         st.markdown("### 🚧 Meterage Completion")
-        total_proposed = collar['ED'].sum()
-        total_drilled = collar[collar['STATUS'].isin(['Closed', 'Running', 'Under Shifting', 'Breakdown'])]['DEPTH'].sum()
-        balance = max(0, total_proposed - total_drilled)
-        
-        # Plot pie chart with no text inside, acting purely as a visual indicator
         fig_comp = px.pie(
             names=['Completed (m)', 'Balance (m)'], 
             values=[total_drilled, balance],
@@ -662,7 +938,6 @@ def render_dashboard():
         fig_comp.update_layout(margin=dict(t=10, b=0, l=0, r=0), height=180, showlegend=True)
         st.plotly_chart(fig_comp, use_container_width=True)
         
-        # Center-aligned text breakdown (Zero Indentation applied here as well)
         st.markdown(f"""
 <div style='text-align: left; font-size: 16px; margin-top: 5px;'>
     <b style='color: #AB63FA;'>Total Meterage Drilled:</b> {total_drilled:,.2f} m <br>
@@ -673,17 +948,15 @@ def render_dashboard():
 
     with c_right:
         st.markdown("### 🚧 Running Boreholes Progress")
-        # Include Breakdown boreholes in the running chart
         running_bhs = collar[collar['STATUS'].isin(['Running', 'Breakdown'])].copy()
         
         if not running_bhs.empty:
-            # Map dynamic colors so Breakdown entries appear Red in the chart
             marker_colors = running_bhs['STATUS'].map(lambda s: STATUS_COLORS.get(s, '#FFA15A')).tolist()
             
             fig_prog = go.Figure()
             fig_prog.add_trace(go.Bar(
                 x=running_bhs['ED'], y=running_bhs['DISPLAY_ID'],
-                orientation='h', name='Target Depth',
+                orientation='h', name='Estimated Depth',
                 marker=dict(color='#f0f2f6', line=dict(color='#d9d9d9', width=1)),
                 hoverinfo='text',
                 text=running_bhs['ED'].apply(lambda x: f"{x:.2f} m"), textposition='inside', 
@@ -708,12 +981,11 @@ def render_dashboard():
             st.plotly_chart(fig_prog, use_container_width=True)
         else:
             st.info("No boreholes are currently running.")
-
     st.markdown("---")
+    # =====================================================================
     # Block 1: Rig Deployment in 4 Columns
     st.markdown("### 🏁 Rig Deployment Status")
     active_rigs = collar[collar['STATUS'].isin(['Running', 'Under Shifting', 'Breakdown'])].copy()
-    
     if not active_rigs.empty:
         rig_cols = st.columns(4)
         for i, (_, row) in enumerate(active_rigs.iterrows()):
@@ -727,7 +999,6 @@ def render_dashboard():
             status = row['STATUS']
             loc = row['DISPLAY_ID']
             
-            # Using two spaces before \n ensures a single line break in Markdown
             with rig_cols[i % 4]:
                 if status == 'Running':
                     st.success(f"🟢 Rig - **{rig_name}**  \nLocation: **{loc}**  \n*(RUNNING)*")
@@ -736,11 +1007,7 @@ def render_dashboard():
                 elif status == 'Breakdown':
                     st.error(f"🔴 Rig - **{rig_name}**  \nLocation: **{loc}**  \n*(BREAKDOWN)*")
     else:
-        st.info("No active, shifting, or breakdown rigs currently recorded in the database.")
-
-    st.markdown("---")
-    
-    # Custom formatter to safely convert Rig No to whole numbers, ignoring text or NaNs
+        st.info("No active, shifting, or breakdown rigs currently recorded in the database.")   
     def format_rig_no(val):
         if pd.isna(val) or str(val).strip().lower() in ['none', 'nan', '']:
             return ""
@@ -748,8 +1015,6 @@ def render_dashboard():
             return f"{int(float(val))}"
         except (ValueError, TypeError):
             return str(val)
-
-    # Helper function to completely clear literal "None" strings and NaNs from text columns
     def clean_none_values(df):
         df_clean = df.copy()
         for col in df_clean.columns:
@@ -759,7 +1024,6 @@ def render_dashboard():
                 )
         return df_clean
 
-    # Define strict CSS styles to force center alignment on both headers (th) and data cells (td)
     center_styles = [
         {'selector': 'th', 'props': [('text-align', 'center !important'), ('font-weight', 'bold !important')]},
         {'selector': 'td', 'props': [('text-align', 'center !important')]}
@@ -780,27 +1044,24 @@ def render_dashboard():
         
         for date_col in ['CLOSING DATE', 'DOC']:
             if date_col in disp_recent_act.columns:
-                disp_recent_act[date_col] = disp_recent_act[date_col].dt.strftime('%d-%b-%Y').fillna('')
+                if pd.api.types.is_datetime64_any_dtype(disp_recent_act[date_col]):
+                    disp_recent_act[date_col] = disp_recent_act[date_col].dt.strftime('%d-%b-%Y').fillna('')
+                else:
+                    disp_recent_act[date_col] = disp_recent_act[date_col].astype(str).replace(['nan', 'NaT', 'None'], '')
         
-        # Clean away any remaining literal 'None' values
         disp_recent_act = clean_none_values(disp_recent_act)
         
         def highlight_status(row):
             status = str(row.get('STATUS', ''))
-            # Convert remarks to lowercase to safely catch text regardless of exact capitalization or brackets
             remarks = str(row.get('REMARKS', '')).lower() 
-            
-            # PRIORITY HIGHLIGHT: If Running or Breakdown AND nearing/achieved closure depth
             if status in ['Running', 'Breakdown'] and ("achieved closure depth" in remarks or "near closure depth" in remarks):
-                return ['background-color: rgba(255, 215, 0, 0.7)'] * len(row) # Distinct Gold/Yellow highlight
-                
-            # Standard fallbacks if the above condition isn't met
+                return ['background-color: rgba(255, 215, 0, 0.3)'] * len(row) 
             if status == 'Running':
-                return ['background-color: rgba(152, 251, 152, 1.0)'] * len(row) # Light Green
+                return ['background-color: rgba(144, 238, 144, 0.4)'] * len(row)
             elif status == 'Breakdown':
-                return ['background-color: rgba(231, 76, 60, 0.3)'] * len(row) # Light Red
+                return ['background-color: rgba(231, 76, 60, 0.3)'] * len(row)
             elif status == 'Under Shifting':
-                return ['background-color: rgba(52, 152, 219, 0.3)'] * len(row) # Light Blue
+                return ['background-color: rgba(52, 152, 219, 0.3)'] * len(row)
             return [''] * len(row)
 
         num_cols_act = disp_recent_act.select_dtypes(include=['number']).columns
@@ -808,7 +1069,6 @@ def render_dashboard():
         if 'RIG NO' in disp_recent_act.columns:
             format_dict_act['RIG NO'] = format_rig_no
 
-        # Apply formatting, apply strict CSS center alignment
         styled_act = (
             disp_recent_act.style
             .apply(highlight_status, axis=1)
@@ -817,11 +1077,7 @@ def render_dashboard():
             .set_table_styles(center_styles)
         )
 
-        st.dataframe(
-            styled_act,
-            use_container_width=True,
-            hide_index=True 
-        )
+        st.dataframe(styled_act, use_container_width=True, hide_index=True)
     else:
         st.info("No running, shifting, or breakdown boreholes found.")
         
@@ -833,28 +1089,23 @@ def render_dashboard():
     
     if not closed_bhs.empty:
         if not closed_bhs['CLOSING DATE'].isna().all():
-            # Sort by date to get the newest ones at the top
             closed_bhs = closed_bhs.sort_values(by='CLOSING DATE', ascending=False)
             
-        # Capture the exact ID of the most recently closed borehole before any further sorting
         most_recent_bhid = closed_bhs.iloc[0]['DISPLAY_ID']
-        
-        recent_closed = closed_bhs.head(5)
-        # Sort alphabetically for display
-        recent_closed = recent_closed.sort_values(by='DISPLAY_ID', ascending=True)
+        recent_closed = closed_bhs.head(5).sort_values(by='DISPLAY_ID', ascending=True)
         
         disp_cols = ['DISPLAY_ID','RL','ED', 'DOC', 'DEPTH', 'HQ', 'CLOSING DATE', 'RIG NO', 'RIG MODEL', 'GPL STATUS','STATUS', 'SID', 'REMARKS']
         actual_cols = [c for c in disp_cols if c in recent_closed.columns]
         disp_recent = recent_closed[actual_cols].copy()
-        
-        # Rename column for display
         disp_recent = disp_recent.rename(columns={'DISPLAY_ID': 'BHID/Point'})
         
         for date_col in ['CLOSING DATE', 'DOC']:
             if date_col in disp_recent.columns:
-                disp_recent[date_col] = disp_recent[date_col].dt.strftime('%d-%b-%Y').fillna('')
+                if pd.api.types.is_datetime64_any_dtype(disp_recent[date_col]):
+                    disp_recent[date_col] = disp_recent[date_col].dt.strftime('%d-%b-%Y').fillna('')
+                else:
+                    disp_recent[date_col] = disp_recent[date_col].astype(str).replace(['nan', 'NaT', 'None'], '')
 
-        # Clean away any remaining literal 'None' values
         disp_recent = clean_none_values(disp_recent)
 
         num_cols_closed = disp_recent.select_dtypes(include=['number']).columns
@@ -862,56 +1113,43 @@ def render_dashboard():
         if 'RIG NO' in disp_recent.columns:
             format_dict_closed['RIG NO'] = format_rig_no
 
-        # Custom function to highlight the most recently closed borehole
         def highlight_newest_closed(row):
             if row['BHID/Point'] == most_recent_bhid:
-                # Using a soft green to indicate a recently completed success
                 return ['background-color: rgba(144, 238, 144, 0.4)'] * len(row)
             return [''] * len(row)
 
-        # Apply formatting, apply row highlighting, and apply strict CSS center alignment
         styled_closed = (
             disp_recent.style
-            .apply(highlight_newest_closed, axis=1)  # Apply the highlight here
+            .apply(highlight_newest_closed, axis=1)
             .format(format_dict_closed, na_rep="")
             .set_properties(**{'text-align': 'center !important'})
             .set_table_styles(center_styles)
         )
 
-        st.dataframe(
-            styled_closed,
-            use_container_width=True,
-            hide_index=True 
-        )
+        st.dataframe(styled_closed, use_container_width=True, hide_index=True)
     else:
         st.info("No closed boreholes found.")
         
     st.markdown("---")
+    render_map() # Assuming render_map() is globally accessible
 
-    # Render original map configuration with no changes
-    render_map(key_suffix="dashboard")
-# =====================================================================
-    # 🧪 NEW BLOCK: Sampling Status & Dispatch Statistics (Above Archive)
+    # =====================================================================
+    # 🧪 Sampling Status & Dispatch Statistics
     # =====================================================================
     st.markdown("---")
-    st.markdown("### 🧪 Sampling Status & Dispatch Statistics")
+    st.markdown("### 🧪 Sampling & Dispatch Status")
     
     if not closed_bhs.empty:
         samp_df = closed_bhs.copy()
         
-        # 1. SAMPLING Status Grouping (Using new separate columns)
         if 'SAMPLING_STATUS' in samp_df.columns and 'LAB' in samp_df.columns:
-            
-            # Clean the Status column safely
             samp_df['STATUS_CLEAN'] = samp_df['SAMPLING_STATUS'].fillna('Pending').astype(str).str.strip().str.title()
             null_strings = ['', 'Nan', 'None', 'Na', '<Na>']
             samp_df.loc[samp_df['STATUS_CLEAN'].isin(null_strings), 'STATUS_CLEAN'] = 'Pending'
             
-            # Clean the Lab column safely (force to uppercase for standard display)
             samp_df['LAB_CLEAN'] = samp_df['LAB'].fillna('').astype(str).str.strip().str.upper()
             samp_df.loc[samp_df['LAB_CLEAN'].isin(['NAN', 'NONE', 'NA', '<NA>']), 'LAB_CLEAN'] = ''
             
-            # Dynamically combine Lab + Status ONLY for the metric UI labels (e.g. "IMMT/Sent")
             def make_metric_label(row):
                 status = row['STATUS_CLEAN']
                 lab = row['LAB_CLEAN']
@@ -920,42 +1158,31 @@ def render_dashboard():
                 return status
                 
             samp_df['METRIC_LABEL'] = samp_df.apply(make_metric_label, axis=1)
-            
-            # Count unique values dynamically based on the generated UI labels
             sampling_counts = samp_df['METRIC_LABEL'].value_counts().reset_index()
             sampling_counts.columns = ['Status Category', 'Borehole Count']
             
-            # Calculate 'Total Sent' by summing any category that contains the word 'Sent'
             sent_mask = sampling_counts['Status Category'].str.lower().str.contains('sent')
             total_sent = sampling_counts.loc[sent_mask, 'Borehole Count'].sum()
             
-            # st.markdown("#### Overall Sampling Status")
-            
-            # Build the metrics list in a logical visual order
             samp_metrics = []
             
-            # 1. Pending (Force to position 1)
             pending_row = sampling_counts[sampling_counts['Status Category'] == 'Pending']
             if not pending_row.empty:
                 samp_metrics.append({"label": "Pending", "value": int(pending_row['Borehole Count'].iloc[0])})
             else:
                 samp_metrics.append({"label": "Pending", "value": 0})
                 
-            # 2. Packed (Force to position 2)
             packed_row = sampling_counts[sampling_counts['Status Category'] == 'Packed']
             if not packed_row.empty:
                 samp_metrics.append({"label": "Packed", "value": int(packed_row['Borehole Count'].iloc[0])})
                 
-            # 3. Dynamic Categories (IMMT/Sent, RANCHI/Sent, etc. populate in the middle)
             for _, row in sampling_counts.iterrows():
                 status = row['Status Category']
                 if status not in ['Pending', 'Packed']:
                     samp_metrics.append({"label": str(status), "value": int(row['Borehole Count'])})
                     
-            # 4. Total Sent (Force to final position)
             samp_metrics.append({"label": "Total Sent", "value": int(total_sent)})
             
-            # Generate Streamlit columns dynamically based on the final list length
             samp_cols = st.columns(len(samp_metrics))
             for col, metric in zip(samp_cols, samp_metrics):
                 col.metric(metric["label"], metric["value"])
@@ -963,14 +1190,11 @@ def render_dashboard():
         else:
             st.info("Columns 'SAMPLING_STATUS' and/or 'LAB' not found in database.")
             
-        st.write("") # Add visual spacing
+        st.write("") 
             
-        # 2. DESPATCH_DATE Batch Statistics
         if 'DESPATCH_DATE' in samp_df.columns:
-            # Drop rows where the despatch date is entirely missing
             batch_df = samp_df.dropna(subset=['DESPATCH_DATE']).copy()
             
-            # Ensure LAB_CLEAN exists for the table even if the metrics block was skipped
             if 'LAB_CLEAN' not in batch_df.columns:
                 if 'LAB' in batch_df.columns:
                     batch_df['LAB_CLEAN'] = batch_df['LAB'].fillna('').astype(str).str.strip().str.upper()
@@ -978,106 +1202,96 @@ def render_dashboard():
                 else:
                     batch_df['LAB_CLEAN'] = 'Unknown'
             
-            # Format the date cleanly for grouping
             if pd.api.types.is_datetime64_any_dtype(batch_df['DESPATCH_DATE']):
                 batch_df['DATE_STR'] = batch_df['DESPATCH_DATE'].dt.strftime('%d-%b-%Y')
             else:
                 batch_df['DATE_STR'] = batch_df['DESPATCH_DATE'].astype(str).str.strip()
-                # Exclude any string artifacts
                 batch_df = batch_df[~batch_df['DATE_STR'].str.lower().isin(['nan', 'none', '', 'nat'])]
                 
             if not batch_df.empty:
-                # Group by Date, count boreholes, grab the unique Lab(s), and list the IDs
                 batch_stats = batch_df.groupby('DATE_STR').agg(
                     Borehole_Count=('DISPLAY_ID', 'count'),
                     Lab_Destination=('LAB_CLEAN', lambda x: ', '.join(filter(lambda item: item != '', x.astype(str).unique()))),
                     Boreholes=('DISPLAY_ID', lambda x: ', '.join(x.astype(str)))
                 ).reset_index()
                 
-                # Attempt to sort by actual date descending
+                # --- APPLY SORTING: LATEST DATE ON TOP ---
                 try:
-                    batch_stats['SortDate'] = pd.to_datetime(batch_stats['DATE_STR'])
+                    # Explicitly convert to datetime for robust sorting
+                    batch_stats['SortDate'] = pd.to_datetime(batch_stats['DATE_STR'], format='%d-%b-%Y', errors='coerce')
                     batch_stats = batch_stats.sort_values(by='SortDate', ascending=False).drop(columns=['SortDate'])
                 except Exception:
                     pass
                 
                 batch_stats.columns = ['Dispatch Date', 'No. of Boreholes', 'Lab', 'Borehole IDs']
+                
+                # --- APPLY TEXT WRAPPING TO BOREHOLES COLUMN ---
+                import textwrap
+                # Dynamically slice the string using textwrap to force linebreaks 
+                # (so it won't trail off outside the dataframe view limits)
+                batch_stats['Borehole IDs'] = batch_stats['Borehole IDs'].apply(
+                    lambda x: "\n".join(textwrap.wrap(x, width=45))
+                )
             else:
                 batch_stats = pd.DataFrame(columns=['Dispatch Date', 'No. of Boreholes', 'Lab', 'Borehole IDs'])
         else:
             batch_stats = pd.DataFrame(columns=['Dispatch Date', 'No. of Boreholes', 'Lab', 'Borehole IDs'])
 
-        # UI Layout: Render Batch Stats full-width below the metrics
         st.markdown("###### Sample Dispatch Batches")
         if not batch_stats.empty:
-            # Dynamic height for batch table to avoid internal scrollbar
-            h_batch = (len(batch_stats) * 35) + 45
             styled_batch = (
                 batch_stats.style
-                # Adding white-space normal so the Borehole IDs wrap to the next line if the list is long
-                .set_properties(**{'text-align': 'center !important', 'white-space': 'normal'})
+                .set_properties(**{'text-align': 'center !important', 'white-space': 'pre-wrap'})
                 .set_table_styles(center_styles)
             )
-            
-            # Render dataframe naturally with container width enabled
+            # Use column config to give the Wrapped Borehole column adequate space
             st.dataframe(
                 styled_batch, 
                 use_container_width=True, 
-                hide_index=True, 
-                height=h_batch
+                hide_index=True,
+                column_config={
+                    "Borehole IDs": st.column_config.TextColumn(
+                        "Borehole IDs",
+                        width="large",
+                    )
+                }
             )
         else:
             st.info("No dispatch dates found in 'DESPATCH_DATE' column yet.")
-        
-            
     else:
         st.info("No closed boreholes available to analyze sampling data.")
 
-
-
-
-
-
     # =====================================================================
-    # 📚 Complete Closed Boreholes Archive (Below the Map)
+    # 📚 Complete Closed Boreholes Archive
     # =====================================================================
     st.markdown("---")
     st.markdown("### 📚 Complete Closed Boreholes Archive")
     
     if not closed_bhs.empty:
-        # Sort the full list so the most recently closed are at the top
         if not closed_bhs['CLOSING DATE'].isna().all():
             full_closed = closed_bhs.sort_values(by='CLOSING DATE', ascending=False)
         else:
             full_closed = closed_bhs.sort_values(by='DISPLAY_ID', ascending=True)
 
-        # Select the same display columns used in your top-5 table, adding sampling columns if they exist
-        disp_cols_full = ['DISPLAY_ID','RL','ED', 'DEPTH', 'HQ', 'DOC', 'CLOSING DATE', 'RIG NO', 'RIG MODEL', 'GPL STATUS''STATUS', 'SID']
+        disp_cols_full = ['DISPLAY_ID','RL','ED', 'DEPTH', 'HQ', 'DOC', 'CLOSING DATE', 'RIG NO', 'RIG MODEL', 'GPL STATUS', 'STATUS', 'SID']
         actual_cols_full = [c for c in disp_cols_full if c in full_closed.columns]
         disp_full = full_closed[actual_cols_full].copy()
-        
-        # Rename for display
         disp_full = disp_full.rename(columns={'DISPLAY_ID': 'BHID/Point'})
         
-        # Format the date columns
         for date_col in ['CLOSING DATE', 'DOC', 'SAMPLE_SENT_DATE']:
             if date_col in disp_full.columns:
-                # Only apply strftime to actual datetime objects
                 if pd.api.types.is_datetime64_any_dtype(disp_full[date_col]):
                     disp_full[date_col] = disp_full[date_col].dt.strftime('%d-%b-%Y').fillna('')
                 else:
                     disp_full[date_col] = disp_full[date_col].astype(str).replace(['nan', 'NaT', 'None'], '')
 
-        # Apply your clean none function
         disp_full = clean_none_values(disp_full)
 
-        # Apply number and Rig No formatting
         num_cols_full = disp_full.select_dtypes(include=['number']).columns
         format_dict_full = {c: "{:.2f}" for c in num_cols_full if c != 'RIG NO'}
         if 'RIG NO' in disp_full.columns:
             format_dict_full['RIG NO'] = format_rig_no
 
-        # Apply CSS styling for center alignment
         styled_full = (
             disp_full.style
             .format(format_dict_full, na_rep="")
@@ -1085,25 +1299,9 @@ def render_dashboard():
             .set_table_styles(center_styles)
         )
 
-        # -----------------------------------------------------------------
-        # DYNAMIC HEIGHT FIX: Calculate exactly how much vertical space the 
-        # table needs to show all rows without an internal scrollbar.
-        # ~35 pixels per row, plus ~40 pixels for the header.
-        # -----------------------------------------------------------------
-        dynamic_table_height = (len(disp_full) * 35) + 45
-
-        # Render the full table with the dynamically calculated height
-        st.dataframe(
-            styled_full,
-            use_container_width=True,
-            hide_index=True,
-            # height=dynamic_table_height 
-        )
+        st.dataframe(styled_full, use_container_width=True, hide_index=True)
     else:
         st.info("No closed boreholes found in the database.")
-
-
-
 
 
 
@@ -1238,7 +1436,6 @@ def plot_plotly_graphic_log(df_litho, df_collar, selected_bhids):
     )
     return fig
 
-
 def render_graphic_logs():
     st.markdown("## 📜 Graphic Logs & Lithology")
     
@@ -1283,13 +1480,6 @@ def render_graphic_logs():
     if export_bhids:
         fig_log = plot_plotly_graphic_log(current_df_litho, st.session_state['df_collar'], export_bhids)
         st.plotly_chart(fig_log, use_container_width=True)
-
-
-
-
-
-
-
 
 def render_seam_statistics():
     st.markdown("## 📈 Comprehensive Seam Statistics")
@@ -1419,7 +1609,6 @@ def render_seam_statistics():
                     use_container_width=True, 
                     hide_index=True
                 )
-
     else:
         st.markdown("### 🌍 Block Management Overview")
         
