@@ -798,6 +798,9 @@ def render_dashboard():
 </style>
 """, unsafe_allow_html=True)
     
+
+
+
     # =====================================================================
     # 📋 DAILY DRILLING PROGRESS REPORT GENERATOR (WhatsApp Auto-Format)
     # =====================================================================
@@ -840,7 +843,12 @@ def render_dashboard():
     if not closed_bhs_news.empty and 'CLOSING DATE_DT' in closed_bhs_news.columns:
         recent_closed_df = closed_bhs_news[closed_bhs_news['CLOSING DATE_DT'] >= yesterday_dt].copy()
         
-    report_bhs = pd.concat([active_bhs, recent_closed_df]).drop_duplicates(subset=['BHID'])
+    # -------------------------------------------------------------------------
+    # 🛠️ BUG FIX: Removed 'subset=["BHID"]' from drop_duplicates. 
+    # This prevents rigs with blank BHIDs from deleting each other!
+    # -------------------------------------------------------------------------
+    report_bhs = pd.concat([active_bhs, recent_closed_df]).drop_duplicates()
+    
     report_bhs['RIG_SORT'] = pd.to_numeric(report_bhs['RIG NO'], errors='coerce').fillna(999)
     report_bhs = report_bhs.sort_values('RIG_SORT')
     
@@ -871,6 +879,7 @@ def render_dashboard():
                 report_lines.append(f"  * GPL completed up to {depth:.2f} m")
         elif status == 'Running':
             report_lines.append(f"  * Depth: {depth:.2f} m")
+            # Freshly Started Logic
             doc = pd.to_datetime(row.get('DOC'), errors='coerce')
             if pd.notna(doc):
                 days_running = (yesterday_dt - doc.normalize()).days
@@ -906,7 +915,7 @@ def render_dashboard():
             date_str = date.strftime('%d-%m-%Y')
             report_lines.append(f"▪️ Samples Dispatched ({date_str}): No. of boreholes - {num_bhs}, Lab - {lab_name}")
         report_lines.append(f"Total - {total_sent_bhs} BHs")
-        # report_lines.append("")
+        report_lines.append("")
 
     report_lines.append("━━━━━━━━━━━━━━━━━━━━━━━━━━")
     report_lines.append("📌 *Project Summary*")
@@ -921,8 +930,9 @@ def render_dashboard():
     with st.expander("📋 Generate Daily Drilling Progress Report"):
         st.code(report_text, language="markdown")
 
-   
-    # =====================================================================
+
+
+
 
     c_left, c_right = st.columns([1, 1.5])
     
